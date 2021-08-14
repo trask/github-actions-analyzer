@@ -15,6 +15,9 @@ import java.sql.SQLException;
 import java.time.Instant;
 import java.time.LocalTime;
 import java.time.ZoneId;
+import java.util.OptionalLong;
+
+import static java.util.concurrent.TimeUnit.SECONDS;
 
 class CachingHttpClient {
 
@@ -108,6 +111,13 @@ class CachingHttpClient {
         printProgress("found in cache, but since updated", response);
         return updatedBody;
       } else {
+        OptionalLong retryAfter = response.headers().firstValueAsLong("retry-after");
+        if (retryAfter.isPresent()) {
+          // sleep a bit and try again
+          System.out.println("retry-after: " + retryAfter.getAsLong());
+          SECONDS.sleep(retryAfter.getAsLong());
+          return internalGet(uri);
+        }
         throw responseException(response);
       }
     }
@@ -120,6 +130,13 @@ class CachingHttpClient {
             .build();
     var response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
     if (response.statusCode() != 200) {
+      OptionalLong retryAfter = response.headers().firstValueAsLong("retry-after");
+      if (retryAfter.isPresent()) {
+        // sleep a bit and try again
+        System.out.println("retry-after: " + retryAfter.getAsLong());
+        SECONDS.sleep(retryAfter.getAsLong());
+        return internalGet(uri);
+      }
       throw responseException(response);
     }
     String body = response.body();
@@ -141,12 +158,17 @@ class CachingHttpClient {
   private IllegalStateException responseException(HttpResponse<String> response) {
     if (response.statusCode() == 403) {
       long rateLimitRemaining =
-          response.headers().firstValueAsLong("x-ratelimit-remaining").orElseThrow();
+          response
+              .headers()
+              .firstValueAsLong("x-ratelimit-remaining")
+              .orElseThrow(
+                  () -> new IllegalStateException(response.headers() + "\n" + response.body()));
       long rateLimitReset =
           response
               .headers()
               .firstValueAsLong("x-ratelimit-reset")
-              .orElseThrow(() -> new IllegalStateException(response.body()));
+              .orElseThrow(
+                  () -> new IllegalStateException(response.headers() + "\n" + response.body()));
       return new IllegalStateException(
           "x-ratelimit-remaining: "
               + rateLimitRemaining
