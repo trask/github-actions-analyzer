@@ -30,28 +30,29 @@ public class GitHubActionsAnalyzer {
   }
 
   public static void main(String[] args) throws Exception {
+    try {
+      var totalDurationsByDay = new HashMap<LocalDate, Set<WorkflowData>>();
 
-    var totalDurationsByDay = new HashMap<LocalDate, Set<WorkflowData>>();
+      for (var repo : getRepos()) {
+        Map<LocalDate, Set<WorkflowData>> workflows = getWorkflowData(repo);
+        System.out.println(repo);
+        print(workflows);
+        System.out.println();
 
-    for (var repo : getRepos()) {
-      Map<LocalDate, Set<WorkflowData>> workflows = getWorkflowData(repo);
-      System.out.println(repo);
-      print(workflows);
-      System.out.println();
-
-      for (var entry : workflows.entrySet()) {
-        totalDurationsByDay
-            .computeIfAbsent(entry.getKey(), d -> new HashSet<>())
-            .addAll(entry.getValue());
+        for (var entry : workflows.entrySet()) {
+          totalDurationsByDay
+              .computeIfAbsent(entry.getKey(), d -> new HashSet<>())
+              .addAll(entry.getValue());
+        }
       }
+
+      System.out.println("totals");
+      print(totalDurationsByDay);
+      System.out.println();
+    } finally {
+      httpClient.close();
+      executor.shutdown();
     }
-
-    System.out.println("totals");
-    print(totalDurationsByDay);
-    System.out.println();
-
-    httpClient.close();
-    executor.shutdown();
   }
 
   private static Map<LocalDate, Set<WorkflowData>> getWorkflowData(String repo) throws Exception {
