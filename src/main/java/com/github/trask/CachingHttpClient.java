@@ -111,14 +111,7 @@ class CachingHttpClient {
         printProgress("found in cache, but since updated", response);
         return updatedBody;
       } else {
-        OptionalLong retryAfter = response.headers().firstValueAsLong("retry-after");
-        if (retryAfter.isPresent()) {
-          // sleep a bit and try again
-          System.out.println("retry-after: " + retryAfter.getAsLong());
-          SECONDS.sleep(retryAfter.getAsLong());
-          return internalGet(uri);
-        }
-        throw responseException(response);
+        return retryIfPossible(response, uri);
       }
     }
 
@@ -130,14 +123,7 @@ class CachingHttpClient {
             .build();
     var response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
     if (response.statusCode() != 200) {
-      OptionalLong retryAfter = response.headers().firstValueAsLong("retry-after");
-      if (retryAfter.isPresent()) {
-        // sleep a bit and try again
-        System.out.println("retry-after: " + retryAfter.getAsLong());
-        SECONDS.sleep(retryAfter.getAsLong());
-        return internalGet(uri);
-      }
-      throw responseException(response);
+      return retryIfPossible(response, uri);
     }
     String body = response.body();
     String etag = response.headers().firstValue("ETag").orElse(null);
@@ -155,34 +141,33 @@ class CachingHttpClient {
     return response.body();
   }
 
-  private IllegalStateException responseException(HttpResponse<String> response) {
-    if (response.statusCode() == 403) {
-      long rateLimitRemaining =
-          response
-              .headers()
-              .firstValueAsLong("x-ratelimit-remaining")
-              .orElseThrow(
-                  () -> new IllegalStateException(response.headers() + "\n" + response.body()));
-      long rateLimitReset =
-          response
-              .headers()
-              .firstValueAsLong("x-ratelimit-reset")
-              .orElseThrow(
-                  () -> new IllegalStateException(response.headers() + "\n" + response.body()));
-      return new IllegalStateException(
-          "x-ratelimit-remaining: "
-              + rateLimitRemaining
-              + ", x-ratelimit-reset: "
-              + LocalTime.ofInstant(Instant.ofEpochSecond(rateLimitReset), ZoneId.systemDefault()));
-    } else {
-      return new IllegalStateException(
-          "Unexpected response code "
-              + response.statusCode()
-              + ": "
-              + response.uri()
-              + "\n"
-              + response.body());
+  private String retryIfPossible(HttpResponse<String> response, String uri) throws Exception {
+    OptionalLong retryAfter = response.headers().firstValueAsLong("retry-after");
+    if (retryAfter.isPresent()) {
+      // sleep a bit and try again
+      System.out.println("retry-after: " + retryAfter.getAsLong());
+      SECONDS.sleep(retryAfter.getAsLong());
+      return internalGet(uri);
     }
+    OptionalLong ratelimitReset = response.headers().firstValueAsLong("x-ratelimit-reset");
+    if (ratelimitReset.isPresent()) {
+      // sleep a bit and try again
+      System.out.println(
+          "x-ratelimit-reset: "
+              + LocalTime.ofInstant(
+                  Instant.ofEpochSecond(ratelimitReset.getAsLong()), ZoneId.systemDefault()));
+      SECONDS.sleep(System.currentTimeMillis() - ratelimitReset.getAsLong() * 1000);
+      return internalGet(uri);
+    }
+    throw new IllegalStateException(
+        "Unexpected response "
+            + response.statusCode()
+            + ": "
+            + response.uri()
+            + "\n"
+            + response.headers()
+            + "\n"
+            + response.body());
   }
 
   private static void printProgress(String message, HttpResponse<?> response) {
