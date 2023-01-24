@@ -145,18 +145,19 @@ class CachingHttpClient {
     OptionalLong retryAfter = response.headers().firstValueAsLong("retry-after");
     if (retryAfter.isPresent()) {
       // sleep a bit and try again
-      System.out.println("retry-after: " + retryAfter.getAsLong());
+      System.out.println("retry-after, sleeping for " + retryAfter.getAsLong() + " seconds");
       SECONDS.sleep(retryAfter.getAsLong());
       return internalGet(uri);
     }
     OptionalLong ratelimitReset = response.headers().firstValueAsLong("x-ratelimit-reset");
     if (ratelimitReset.isPresent()) {
       // sleep a bit and try again
+      long sleepSeconds = ratelimitReset.getAsLong() - System.currentTimeMillis() / 1000;
       System.out.println(
-          "x-ratelimit-reset: "
+          "x-ratelimit-reset, sleeping until "
               + LocalTime.ofInstant(
                   Instant.ofEpochSecond(ratelimitReset.getAsLong()), ZoneId.systemDefault()));
-      SECONDS.sleep(System.currentTimeMillis() - ratelimitReset.getAsLong() * 1000);
+      SECONDS.sleep(sleepSeconds);
       return internalGet(uri);
     }
     throw new IllegalStateException(

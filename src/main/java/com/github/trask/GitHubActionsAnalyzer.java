@@ -15,7 +15,7 @@ import java.util.stream.Collectors;
 
 public class GitHubActionsAnalyzer {
 
-  private static final LocalDate START_DATE = LocalDate.of(2021, 8, 1);
+  private static final LocalDate START_DATE = LocalDate.of(2023, 1, 23);
   private static final ZoneId TIME_ZONE = ZoneId.of("America/Los_Angeles");
 
   private static final ExecutorService executor = Executors.newFixedThreadPool(16);
@@ -34,8 +34,8 @@ public class GitHubActionsAnalyzer {
       var totalDurationsByDay = new HashMap<LocalDate, Set<WorkflowData>>();
 
       for (var repo : getRepos()) {
-        Map<LocalDate, Set<WorkflowData>> workflows = getWorkflowData(repo);
         System.out.println(repo);
+        Map<LocalDate, Set<WorkflowData>> workflows = getWorkflowData(repo);
         print(workflows);
         System.out.println();
 
