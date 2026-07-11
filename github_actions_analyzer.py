@@ -13,12 +13,12 @@ from http.client import HTTPResponse
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.error import HTTPError
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlparse
 from urllib.request import Request, urlopen
 
 
-START = datetime(2026, 5, 19, hour=13, tzinfo=UTC)
-END = datetime(2026, 5, 19, hour=17, tzinfo=UTC)
+START = datetime(2026, 7, 10, hour=15, tzinfo=UTC)
+END = datetime(2026, 7, 10, hour=16, tzinfo=UTC)
 PAGE_SIZE = 100
 MIN_QUEUE_TIME = timedelta(minutes=10)
 WORKFLOW_TIMEOUT = timedelta(hours=6)
@@ -29,11 +29,9 @@ class CachingHttpClient:
     def __init__(
         self,
         cache_path: Path = Path("cache.sqlite"),
-        bypass_etag_check: bool = False,
         print_progress: bool = False,
     ) -> None:
         self._auth_token = os.getenv("GITHUB_AUTH_TOKEN")
-        self._bypass_etag_check = bypass_etag_check
         self._print_progress = print_progress
         self._connection = sqlite3.connect(cache_path)
         self._connection.execute(
@@ -44,10 +42,10 @@ class CachingHttpClient:
     def close(self) -> None:
         self._connection.close()
 
-    def get_json(self, uri: str) -> Any:
-        return json.loads(self._get(uri))
+    def get_json(self, uri: str, immutable: bool = False) -> Any:
+        return json.loads(self._get(uri, immutable))
 
-    def _get(self, uri: str) -> str:
+    def _get(self, uri: str, immutable: bool = False) -> str:
         row = self._connection.execute(
             "select body, etag from cache where uri = ?", (uri,)
         ).fetchone()
@@ -55,8 +53,11 @@ class CachingHttpClient:
         cached_etag = row[1] if row else None
 
         if cached_body is not None and cached_etag is not None:
-            if self._bypass_etag_check:
-                self._print("bypass etag check", uri)
+            if (
+                immutable
+                or self._is_completed_historical_runs_response(uri, cached_body)
+            ):
+                self._print("immutable cache", uri)
                 return cached_body
 
             response = self._send(uri, cached_etag)
@@ -91,6 +92,23 @@ class CachingHttpClient:
         else:
             self._print("no etag", uri, response)
         return body
+
+    @staticmethod
+    def _is_completed_historical_runs_response(uri: str, body: str) -> bool:
+        parsed_uri = urlparse(uri)
+        if not parsed_uri.path.endswith("/actions/runs"):
+            return False
+
+        created_ranges = parse_qs(parsed_uri.query).get("created")
+        if not created_ranges:
+            return False
+
+        _, separator, end = created_ranges[0].partition("..")
+        if not separator or _parse_instant(end) > datetime.now(UTC):
+            return False
+
+        workflow_runs = json.loads(body).get("workflow_runs", [])
+        return all(run.get("status") == "completed" for run in workflow_runs)
 
     def _send(self, uri: str, etag: str | None = None) -> HTTPResponse | HTTPError:
         headers = {"Accept": "application/vnd.github+json"}
@@ -159,7 +177,6 @@ def main() -> None:
 
     client = CachingHttpClient(
         cache_path=args.cache_path,
-        bypass_etag_check=args.bypass_etag_check,
         print_progress=args.print_progress,
     )
     try:
@@ -176,14 +193,16 @@ def get_workflow_data(client: CachingHttpClient, config: AnalyzerConfig, repo: s
             continue
 
         duration = _duration(workflow_run["created_at"], workflow_run["updated_at"])
-        if duration < config.min_queue_time or duration > config.workflow_timeout:
+        if duration <= config.min_queue_time or duration > config.workflow_timeout:
             continue
 
-        alt_duration_minutes = duration.total_seconds() / 60
-        if alt_duration_minutes <= 60 or alt_duration_minutes >= 360:
-            continue
-
-        jobs = get_jobs(client, config.org, repo, workflow_run["id"])
+        jobs = get_jobs(
+            client,
+            config.org,
+            repo,
+            workflow_run["id"],
+            immutable=workflow_run.get("status") == "completed",
+        )
         first_job_started_at = min(
             (_parse_instant(job["started_at"]) for job in jobs if job.get("started_at") is not None),
             default=None,
@@ -260,18 +279,24 @@ def get_runs_response(
     created_range = f"{_format_instant(start)}..{_format_instant(end)}"
     path = (
         f"/actions/runs?created={quote(created_range)}"
-        f"&event=pull_request&per_page={PAGE_SIZE}&page={page}&exclude_pull_requests=true"
+        f"&per_page={PAGE_SIZE}&page={page}&exclude_pull_requests=true"
     )
     return send_repo_request(client, org, repo, path)
 
 
-def get_jobs(client: CachingHttpClient, org: str, repo: str, workflow_run_id: int) -> list[dict[str, Any]]:
-    jobs_response = get_jobs_response(client, org, repo, workflow_run_id, 1)
+def get_jobs(
+    client: CachingHttpClient,
+    org: str,
+    repo: str,
+    workflow_run_id: int,
+    immutable: bool = False,
+) -> list[dict[str, Any]]:
+    jobs_response = get_jobs_response(client, org, repo, workflow_run_id, 1, immutable)
 
     results = list(jobs_response["jobs"])
     total_pages = math.ceil(jobs_response["total_count"] / PAGE_SIZE)
     for page in range(2, total_pages + 1):
-        results.extend(get_jobs_response(client, org, repo, workflow_run_id, page)["jobs"])
+        results.extend(get_jobs_response(client, org, repo, workflow_run_id, page, immutable)["jobs"])
 
     if len(results) != jobs_response["total_count"]:
         raise RuntimeError(
@@ -288,13 +313,23 @@ def get_jobs_response(
     repo: str,
     workflow_run_id: int,
     page: int,
+    immutable: bool = False,
 ) -> dict[str, Any]:
     path = f"/actions/runs/{workflow_run_id}/jobs?per_page={PAGE_SIZE}&page={page}"
-    return send_repo_request(client, org, repo, path)
+    return send_repo_request(client, org, repo, path, immutable)
 
 
-def send_repo_request(client: CachingHttpClient, org: str, repo: str, path: str) -> dict[str, Any]:
-    return client.get_json(f"https://api.github.com/repos/{quote(org)}/{quote(repo)}{path}")
+def send_repo_request(
+    client: CachingHttpClient,
+    org: str,
+    repo: str,
+    path: str,
+    immutable: bool = False,
+) -> dict[str, Any]:
+    return client.get_json(
+        f"https://api.github.com/repos/{quote(org)}/{quote(repo)}{path}",
+        immutable,
+    )
 
 
 def _split_range(start: datetime, end: datetime) -> Iterable[tuple[datetime, datetime]]:
@@ -336,7 +371,6 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--min-queue-minutes", type=int, default=int(MIN_QUEUE_TIME.total_seconds() / 60))
     parser.add_argument("--workflow-timeout-hours", type=int, default=int(WORKFLOW_TIMEOUT.total_seconds() / 3600))
     parser.add_argument("--cache-path", type=Path, default=Path("cache.sqlite"))
-    parser.add_argument("--bypass-etag-check", action="store_true")
     parser.add_argument("--print-progress", action="store_true")
     return parser.parse_args()
 
