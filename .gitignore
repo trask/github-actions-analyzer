@@ -1,4 +1,7 @@
 /.venv
 /cache.sqlite*
+/build/export/
+/build/queue-wait-raw-data.zip
 __pycache__/
 *.py[cod]
+/build/*.log
